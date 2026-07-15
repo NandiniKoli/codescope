@@ -21,3 +21,4 @@ neo4j
 fastapi
 uvicorn
 requests
+python-dotenv
