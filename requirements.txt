@@ -1,4 +1,4 @@
-tree-sitter
+﻿tree-sitter
 tree-sitter-python
 tree-sitter-javascript
 tree-sitter-typescript
@@ -13,7 +13,6 @@ tree-sitter-c-sharp
 tree-sitter-kotlin
 tree-sitter-swift
 tree-sitter-scala
-tree-sitter-dart
 tree-sitter-lua
 tree-sitter-haskell
 tree-sitter-bash
@@ -22,3 +21,4 @@ fastapi
 uvicorn
 requests
 python-dotenv
+pydantic
