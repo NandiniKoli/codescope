@@ -4,3 +4,4 @@ test_lang/
 __pycache__/
 *.pyc
 .env
+*.pem
