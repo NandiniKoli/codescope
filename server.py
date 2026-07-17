@@ -17,6 +17,7 @@ from explain import explain_codebase
 import main as core
 from dotenv import load_dotenv
 load_dotenv()
+from github_app import get_installation_token
 
 
 app = FastAPI()
@@ -126,38 +127,36 @@ def get_pr_changed_files(repo_full_name: str, pr_number: int) -> list[str]:
         return []
 
 
-def post_pr_comment(repo_full_name: str, pr_number: int, body: str):
-    """Posts a comment onto the given PR using the GitHub REST API."""
+def post_pr_comment(repo_full_name: str, pr_number: int, body: str, installation_token: str):
+    """Posts a comment onto the given PR using the GitHub REST API,
+    authenticated as the specific installation that triggered this event."""
     url = f"https://api.github.com/repos/{repo_full_name}/issues/{pr_number}/comments"
     try:
         requests.post(
             url,
             headers={
-                "Authorization": f"Bearer {GITHUB_TOKEN}",
+                "Authorization": f"Bearer {installation_token}",
                 "Accept": "application/vnd.github+json",
             },
             json={"body": body},
             timeout=15,
         )
     except requests.exceptions.RequestException:
-        # Posting the comment failed (bad token, network issue, etc).
-        # Nothing further we can do here -- this already runs in a
-        # background task with no one waiting on its return value.
         pass
 
 
-def process_pr_event(repo_full_name: str, clone_url: str, pr_number: int):
-    """Runs in the background after a verified pull_request webhook event:
-    clones the PR's repo, builds the dependency graph, figures out which
-    functions were actually defined in files this PR changed, and posts a
-    risk report scoped to just those -- not a generic whole-repo summary."""
+def process_pr_event(repo_full_name: str, clone_url: str, pr_number: int, installation_id: int):
+    try:
+        installation_token = get_installation_token(installation_id)
+    except Exception as e:
+        print(f"Failed to get installation token: {e}")
+        return
+
     try:
         validate_repo_url(clone_url.removesuffix(".git"))
     except ValueError as e:
-        post_pr_comment(repo_full_name, pr_number, f"CodeScope could not process this repo: {e}")
+        post_pr_comment(repo_full_name, pr_number, f"CodeScope could not process this repo: {e}", installation_token)
         return
-
-    changed_files = get_pr_changed_files(repo_full_name, pr_number)
 
     temp_dir = tempfile.mkdtemp()
     try:
@@ -170,51 +169,25 @@ def process_pr_event(repo_full_name: str, clone_url: str, pr_number: int):
         graph = CodeGraph(core.NEO4J_URI, core.NEO4J_USERNAME, core.NEO4J_PASSWORD)
         graph.clear_all()
         graph.insert_facts(facts)
-
-        # Functions actually defined in files this PR touched -- this is
-        # what scopes the report to the PR instead of the whole repo.
-        changed_function_names = sorted({
-            f["name"] for f in facts
-            if f["type"] == "FUNCTION_DEFINED" and f["file"] in changed_files
-        })
-
-        if not changed_function_names:
-            graph.close()
-            post_pr_comment(
-                repo_full_name, pr_number,
-                "## CodeScope Analysis\n\n"
-                "No analyzable functions were found in the files this PR changed "
-                "(e.g. docs-only changes, or a language CodeScope doesn't parse yet). "
-                "No risk report to show for this one."
-            )
-            return
-
-        comment_body = "## CodeScope Analysis\n\n"
-        comment_body += f"This PR changes **{len(changed_function_names)} function(s)**. Risk report:\n\n"
-
-        for fn_name in changed_function_names:
-            affected = graph.find_impact(fn_name)
-            report = score_risk(affected)
-            comment_body += f"### `{fn_name}` \u2014 Risk: **{report['risk_level']}**\n"
-            if report["affected_count"] == 0:
-                comment_body += "Nothing else in this codebase currently depends on this function.\n\n"
-            else:
-                comment_body += f"Affects **{report['affected_count']}** other function(s):\n"
-                for aff in report["affected_functions"][:10]:
-                    comment_body += f"- `{aff['name']}` (in `{aff['file']}`)\n"
-                if report["affected_count"] > 10:
-                    comment_body += f"- ...and {report['affected_count'] - 10} more\n"
-                comment_body += "\n"
-
+        central = graph.find_central_functions(5)
+        edges = graph.get_all_edges()
         graph.close()
-        post_pr_comment(repo_full_name, pr_number, comment_body)
+
+        explanation = explain_codebase(central, edges)
+
+        comment_body = "## CodeScope Analysis\n\n" + explanation + "\n\n"
+        comment_body += "**Most important functions in this codebase:**\n"
+        for fn in central:
+            comment_body += f"- `{fn['name']}` (in `{fn['file']}`) \u2014 called from {fn['incoming_calls']} place(s)\n"
+
+        post_pr_comment(repo_full_name, pr_number, comment_body, installation_token)
 
     except subprocess.CalledProcessError as e:
-        post_pr_comment(repo_full_name, pr_number, f"CodeScope could not clone this repo: {e.stderr.decode(errors='ignore')}")
+        post_pr_comment(repo_full_name, pr_number, f"CodeScope could not clone this repo: {e.stderr.decode(errors='ignore')}", installation_token)
     except subprocess.TimeoutExpired:
-        post_pr_comment(repo_full_name, pr_number, "CodeScope timed out while cloning this repo.")
+        post_pr_comment(repo_full_name, pr_number, "CodeScope timed out while cloning this repo.", installation_token)
     except Exception as e:
-        post_pr_comment(repo_full_name, pr_number, f"CodeScope analysis failed: {e}")
+        post_pr_comment(repo_full_name, pr_number, f"CodeScope analysis failed: {e}", installation_token)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -237,10 +210,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         repo_full_name = payload["repository"]["full_name"]
         clone_url = payload["repository"]["clone_url"]
         pr_number = payload["pull_request"]["number"]
-        background_tasks.add_task(process_pr_event, repo_full_name, clone_url, pr_number)
+        installation_id = payload["installation"]["id"]
+        background_tasks.add_task(process_pr_event, repo_full_name, clone_url, pr_number, installation_id)
         return {"status": "processing"}
-
-    return {"status": "ignored", "event": event_type}
 
 
 @app.post("/scan")

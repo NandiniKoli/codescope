@@ -22,3 +22,5 @@ uvicorn
 requests
 python-dotenv
 pydantic
+PyJWT
+cryptography
