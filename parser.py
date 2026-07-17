@@ -15,7 +15,6 @@ import tree_sitter_c_sharp as tscsharp
 import tree_sitter_kotlin as tskotlin
 import tree_sitter_swift as tsswift
 import tree_sitter_scala as tsscala
-import tree_sitter_dart as tsdart
 import tree_sitter_lua as tslua
 import tree_sitter_haskell as tshaskell
 import tree_sitter_bash as tsbash

@@ -19,9 +19,10 @@ from graph import CodeGraph
 from risk import score_risk
 from explain import explain_codebase
 import textwrap
-
 # ---- EDIT THESE to match your own Neo4j Desktop setup ----
 import os
+from dotenv import load_dotenv
+load_dotenv()
 
 NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://127.0.0.1:7687")
 NEO4J_USERNAME = os.environ.get("NEO4J_USERNAME", "neo4j")
