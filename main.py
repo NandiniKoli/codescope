@@ -24,9 +24,9 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://127.0.0.1:7687")
-NEO4J_USERNAME = os.environ.get("NEO4J_USERNAME", "neo4j")
-NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "changeme")
+NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://127.0.0.1:7687").strip()
+NEO4J_USERNAME = os.environ.get("NEO4J_USERNAME", "neo4j").strip()
+NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "changeme").strip()
 
 def cmd_scan(folder_path):
     print(f"Scanning folder: {folder_path}")
