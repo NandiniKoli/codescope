@@ -6,15 +6,26 @@ and surfaces anything that LOOKS structurally suspicious for manual review
 for real repos), but red flags worth a human double-checking.
 """
 
+import os
 import subprocess
+import sys
 import tempfile
 import shutil
+from dotenv import load_dotenv
 from parser import extract_facts_from_folder
 from graph import CodeGraph
 
-NEO4J_URI = "neo4j+s://4aae8249.databases.neo4j.io"
-NEO4J_USERNAME = "neo4j"
-NEO4J_PASSWORD = "Hz1oFxvfU1jEhD_Z3CsvqHzMhyJrRK0fh11TKlgaP3I"
+load_dotenv()
+
+NEO4J_URI = os.environ.get("NEO4J_URI")
+NEO4J_USERNAME = os.environ.get("NEO4J_USERNAME")
+NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD")
+
+if not all([NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD]):
+    sys.exit(
+        "Missing NEO4J_URI / NEO4J_USERNAME / NEO4J_PASSWORD. "
+        "Set them in your .env file (see .env.example) before running this script."
+    )
 
 REPOS = [
     # Already validated, keep as regression checks
@@ -88,6 +99,6 @@ if __name__ == "__main__":
         if result["red_flags"]:
             print("RED FLAGS (needs manual review):")
             for flag in result["red_flags"]:
-                print(f"  ⚠ {flag}")
+                print(f"  \u26a0 {flag}")
         else:
             print("No automatic red flags.")
