@@ -176,6 +176,10 @@ COMMON_BUILTIN_CALLS = {
     "forEach", "toString", "valueOf", "hasOwnProperty",
     # Common across many languages
     "toString", "equals", "hashCode", "clone", "next", "hasNext",
+    # Common ML/data-science library methods (scikit-learn, pandas, numpy)
+    "predict", "predict_proba", "transform", "fit", "fit_transform",
+    "score", "info", "head", "tail", "describe", "shape", "reshape",
+    "loc", "iloc", "to_dict", "to_json", "round", "max", "min", "sum",
 }
 
 EXT_TO_LANG = {}
@@ -230,9 +234,39 @@ def extract_facts_from_file(filepath):
             else:
                 func_node = node.children[0] if node.children else None
             if func_node and current_function and func_node.type != lang_cfg["call_type"]:
-                called_name = code[func_node.start_byte:func_node.end_byte].decode("utf8", errors="ignore")
-                called_name = called_name.split(".")[-1].split("::")[-1]
-                if called_name not in COMMON_BUILTIN_CALLS:
+                raw_called_name = code[func_node.start_byte:func_node.end_byte].decode("utf8", errors="ignore")
+                is_method_call = "." in raw_called_name or "::" in raw_called_name
+                # super().method(...) calls the PARENT class's version of a
+                # method, not the current class's own same-named method. We
+                # don't track class hierarchy, so we can't resolve which
+                # parent method it really is -- and leaving it unfiltered
+                # creates a false self-loop (e.g. __init__ calling itself)
+                # whenever a subclass's method shares a name with its own
+                # super().method() call, which is an extremely common
+                # pattern (__init__, __str__, etc.).
+                called_name = raw_called_name.split(".")[-1].split("::")[-1]
+                # super().method(...) delegates to the PARENT class's version
+                # of a method, not the current class's own same-named method.
+                # We don't track class hierarchy, so we can't resolve which
+                # parent method it really is -- unfiltered, this creates a
+                # false self-loop (e.g. get_command calling itself) whenever
+                # a subclass's method shares a name with its super().method()
+                # call. This applies to ANY method name, not just dunders.
+                is_super_call = raw_called_name.startswith("super(")
+                # Dunder methods (__init__, __str__, __repr__, etc.) are also
+                # overwhelmingly called via a named parent class instead of
+                # super(), e.g. ParentClass.__init__(self, ...) -- same
+                # unresolvable-parent-method problem, so skip these too.
+                is_dunder_delegation = (
+                    is_method_call
+                    and called_name.startswith("__")
+                    and called_name.endswith("__")
+                )
+                if is_super_call or is_dunder_delegation:
+                    pass  # skip: can't safely resolve which parent method this refers to
+                elif is_method_call and called_name in COMMON_BUILTIN_CALLS:
+                    pass
+                else:
                     facts.append({
                         "type": "CALLS",
                         "caller": current_function,
@@ -245,7 +279,48 @@ def extract_facts_from_file(filepath):
             walk(child, current_function)
 
     walk(tree.root_node)
+
+    if lang_name == "python":
+        for imported_name in extract_python_imports(tree, code):
+            facts.append({
+                "type": "IMPORTS",
+                "file": filename,
+                "name": imported_name,
+                "lang": lang_name
+            })
+
     return facts
+
+def extract_python_imports(tree, code):
+    """Returns the set of names explicitly imported in a Python file --
+    e.g. `from explain import explain_codebase` yields {"explain_codebase"}.
+    Used to verify a cross-file call is real, not guessed: if a file calls
+    `explain_codebase(...)`, we only connect that to another file's
+    `explain_codebase` function if this file actually imported that exact
+    name -- not just because they share a language."""
+    imported_names = set()
+
+    def walk_imports(node):
+        if node.type == "import_from_statement":
+            for child in node.children:
+                if child.type in ("dotted_name", "identifier"):
+                    imported_names.add(code[child.start_byte:child.end_byte].decode("utf8", errors="ignore"))
+                elif child.type == "aliased_import":
+                    name_node = child.child_by_field_name("alias") or child.children[0]
+                    imported_names.add(code[name_node.start_byte:name_node.end_byte].decode("utf8", errors="ignore"))
+        elif node.type == "import_statement":
+            for child in node.children:
+                if child.type == "dotted_name":
+                    text = code[child.start_byte:child.end_byte].decode("utf8", errors="ignore")
+                    imported_names.add(text.split(".")[-1])
+                elif child.type == "aliased_import":
+                    name_node = child.child_by_field_name("alias") or child.children[0]
+                    imported_names.add(code[name_node.start_byte:name_node.end_byte].decode("utf8", errors="ignore"))
+        for child in node.children:
+            walk_imports(child)
+
+    walk_imports(tree.root_node)
+    return imported_names
 
 
 def extract_facts_from_folder(folder_path):

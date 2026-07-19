@@ -160,10 +160,23 @@ def process_pr_event(repo_full_name: str, clone_url: str, pr_number: int, instal
 
     temp_dir = tempfile.mkdtemp()
     try:
-        subprocess.run(
-            ["git", "clone", "--depth", "1", clone_url, temp_dir],
-            check=True, capture_output=True, timeout=60
-        )
+        for attempt in range(2):
+            try:
+                subprocess.run(
+                    ["git", "clone", "--depth", "1", clone_url, temp_dir],
+                    check=True, capture_output=True, timeout=90, stdin=subprocess.DEVNULL
+                )
+                break  # Success, exit the retry loop
+            except OSError:
+                if attempt == 1:
+                    raise
+            except subprocess.CalledProcessError as e:
+                post_pr_comment(repo_full_name, pr_number, f"CodeScope could not clone this repo: {e.stderr.decode(errors='ignore')}", installation_token)
+                return
+            except subprocess.TimeoutExpired:
+                post_pr_comment(repo_full_name, pr_number, "CodeScope timed out while cloning this repo.", installation_token)
+                return
+
         facts = extract_facts_from_folder(temp_dir)
 
         graph = CodeGraph(core.NEO4J_URI, core.NEO4J_USERNAME, core.NEO4J_PASSWORD)
@@ -224,10 +237,17 @@ def scan(req: ScanRequest):
 
     temp_dir = tempfile.mkdtemp()
     try:
-        subprocess.run(
-            ["git", "clone", "--depth", "1", req.repo_url, temp_dir],
-            check=True, capture_output=True, timeout=60
-        )
+        for attempt in range(2):
+            try:
+                subprocess.run(
+                    ["git", "clone", "--depth", "1", req.repo_url, temp_dir],
+                    check=True, capture_output=True, timeout=90, stdin=subprocess.DEVNULL
+                )
+                break  # Success, exit the retry loop
+            except OSError:
+                if attempt == 1:
+                    raise
+
         facts = extract_facts_from_folder(temp_dir)
 
         graph = CodeGraph(core.NEO4J_URI, core.NEO4J_USERNAME, core.NEO4J_PASSWORD)
