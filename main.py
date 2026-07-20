@@ -33,14 +33,14 @@ def cmd_scan(folder_path):
     facts = extract_facts_from_folder(folder_path)
     print(f"Extracted {len(facts)} facts.")
 
-    graph = CodeGraph(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD)
+    graph = CodeGraph(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, "local-cli")   
     graph.insert_facts(facts)
     graph.close()
     print("Dependency graph updated in Neo4j.")
 
 
 def cmd_impact(function_name):
-    graph = CodeGraph(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD)
+    graph = CodeGraph(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, "local-cli")
     affected = graph.find_impact(function_name)
     graph.close()
 
@@ -54,7 +54,7 @@ def cmd_impact(function_name):
 
 
 def cmd_map():
-    graph = CodeGraph(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD)
+    graph = CodeGraph(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, "local-cli")
     central = graph.find_central_functions(5)
     graph.close()
 
@@ -63,7 +63,7 @@ def cmd_map():
         print(f"  - {fn['name']}  (in {fn['file']})  <- called from {fn['incoming_calls']} place(s)")
 
 def cmd_explain():
-    graph = CodeGraph(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD)
+    graph = CodeGraph(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, "local-cli")
     central = graph.find_central_functions(5)
     edges = graph.get_all_edges()
     graph.close()

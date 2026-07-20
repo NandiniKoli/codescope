@@ -2,77 +2,71 @@
 graph.py
 Handles all Neo4j interactions: inserting parsed facts, and
 running impact-analysis queries on the stored dependency graph.
+
+Every node is tagged with a scan_id, so concurrent analyses (e.g. two
+webhook events arriving close together) never wipe or read each other's
+data. Each caller of CodeGraph must supply a unique scan_id per analysis
+run (e.g. "owner/repo#pr_number" or a fresh uuid).
 """
 
 from neo4j import GraphDatabase
 
 
 class CodeGraph:
-    def __init__(self, uri, username, password):
+    def __init__(self, uri, username, password, scan_id):
         self.driver = GraphDatabase.driver(uri, auth=(username, password))
+        self.scan_id = scan_id
 
     def close(self):
         self.driver.close()
 
     def clear_all(self):
-        """Wipes the graph. Useful while testing, NOT for production use."""
+        """Wipes ONLY this scan's data, not the whole database. Safe to call
+        even while other scans are running concurrently."""
         with self.driver.session() as session:
-            session.run("MATCH (n) DETACH DELETE n")
+            session.run(
+                "MATCH (n:Function {scan_id: $scan_id}) DETACH DELETE n",
+                scan_id=self.scan_id
+            )
 
     def insert_facts(self, facts):
         function_facts = [f for f in facts if f["type"] == "FUNCTION_DEFINED"]
         call_facts = [f for f in facts if f["type"] == "CALLS"]
         import_facts = [f for f in facts if f["type"] == "IMPORTS"]
 
-        # Map: file -> set of names that file explicitly imported.
-        # Used to verify a cross-file call is real, not guessed.
         file_imports = {}
         for f in import_facts:
             file_imports.setdefault(f["file"], set()).add(f["name"])
 
         with self.driver.session() as session:
-            session.execute_write(self._insert_function_facts_tx, function_facts)
-            session.execute_write(self._insert_call_facts_tx, call_facts, file_imports)
+            session.execute_write(self._insert_function_facts_tx, function_facts, self.scan_id)
+            session.execute_write(self._insert_call_facts_tx, call_facts, file_imports, self.scan_id)
 
     def get_all_edges(self):
         with self.driver.session() as session:
             result = session.run("""
-                MATCH (a:Function)-[:CALLS]->(b:Function)
+                MATCH (a:Function {scan_id: $scan_id})-[:CALLS]->(b:Function {scan_id: $scan_id})
                 RETURN a.name AS caller, b.name AS callee
-            """)
+            """, scan_id=self.scan_id)
             return [{"caller": r["caller"], "callee": r["callee"]} for r in result]
 
-    # Languages where a same-named function is genuinely likely to be
-    # defined in one file and called from another (common module-splitting
-    # convention, confirmed with underscore.js). Cross-file fallback matching
-    # is safe here without needing an explicit import check. All other
-    # languages default to strict same-file matching -- EXCEPT Python, which
-    # now uses verified import-based matching instead (see _insert_call_facts_tx).
-    # Heavy reuse of common method/function names across unrelated types
-    # (Go's String()/New(), Rust's new()/as_bytes(), Java's get(), C++'s
-    # size()/create()) makes ungated project-wide name matching produce
-    # massive false fan-in -- confirmed across gin, ripgrep, gson, and
-    # nlohmann/json in real-world testing.
     CROSS_FILE_FALLBACK_LANGUAGES = {"javascript", "typescript"}
 
     @staticmethod
-    def _insert_function_facts_tx(tx, facts):
+    def _insert_function_facts_tx(tx, facts, scan_id):
         for fact in facts:
             tx.run(
-                "MERGE (f:Function {name: $name, file: $file}) SET f.lang = $lang",
-                name=fact["name"], file=fact["file"], lang=fact["lang"]
+                "MERGE (f:Function {name: $name, file: $file, scan_id: $scan_id}) SET f.lang = $lang",
+                name=fact["name"], file=fact["file"], lang=fact["lang"], scan_id=scan_id
             )
 
     @staticmethod
-    def _insert_call_facts_tx(tx, facts, file_imports):
+    def _insert_call_facts_tx(tx, facts, file_imports, scan_id):
         for fact in facts:
             lang = fact["lang"]
             caller_file = fact["file"]
             callee = fact["callee"]
 
-            # JS/TS: project-wide fallback confirmed safe/needed (underscore.js).
-            # Python: fallback only if this file explicitly imported that exact
-            # name -- a verified fact from the source, not a guess.
             allow_fallback = (
                 lang in CodeGraph.CROSS_FILE_FALLBACK_LANGUAGES
                 or (lang == "python" and callee in file_imports.get(caller_file, set()))
@@ -81,52 +75,50 @@ class CodeGraph:
             if allow_fallback:
                 tx.run(
                     """
-                    MATCH (a:Function {name: $caller, file: $file})
-                    OPTIONAL MATCH (b_same:Function {name: $callee, file: $file})
-                    OPTIONAL MATCH (b_other:Function {name: $callee, lang: $lang})
+                    MATCH (a:Function {name: $caller, file: $file, scan_id: $scan_id})
+                    OPTIONAL MATCH (b_same:Function {name: $callee, file: $file, scan_id: $scan_id})
+                    OPTIONAL MATCH (b_other:Function {name: $callee, lang: $lang, scan_id: $scan_id})
                     WITH a, coalesce(b_same, b_other) AS b
                     WHERE b IS NOT NULL
                     MERGE (a)-[:CALLS]->(b)
                     """,
-                    caller=fact["caller"], callee=callee, file=caller_file, lang=lang
+                    caller=fact["caller"], callee=callee, file=caller_file, lang=lang, scan_id=scan_id
                 )
             else:
                 tx.run(
                     """
-                    MATCH (a:Function {name: $caller, file: $file})
-                    MATCH (b:Function {name: $callee, file: $file})
+                    MATCH (a:Function {name: $caller, file: $file, scan_id: $scan_id})
+                    MATCH (b:Function {name: $callee, file: $file, scan_id: $scan_id})
                     MERGE (a)-[:CALLS]->(b)
                     """,
-                    caller=fact["caller"], callee=callee, file=caller_file
+                    caller=fact["caller"], callee=callee, file=caller_file, scan_id=scan_id
                 )
 
     def find_impact(self, function_name, max_hops=3):
-        """Returns every function that depends (directly or indirectly) on function_name."""
         with self.driver.session() as session:
-            result = session.execute_read(self._find_impact_tx, function_name, max_hops)
-            return result
+            return session.execute_read(self._find_impact_tx, function_name, max_hops, self.scan_id)
 
     @staticmethod
-    def _find_impact_tx(tx, function_name, max_hops):
+    def _find_impact_tx(tx, function_name, max_hops, scan_id):
         query = f"""
-            MATCH (affected)-[:CALLS*1..{max_hops}]->(target:Function {{name: $name}})
+            MATCH (affected {{scan_id: $scan_id}})-[:CALLS*1..{max_hops}]->(target:Function {{name: $name, scan_id: $scan_id}})
             RETURN DISTINCT affected.name AS name, affected.file AS file
         """
-        result = tx.run(query, name=function_name)
+        result = tx.run(query, name=function_name, scan_id=scan_id)
         return [{"name": r["name"], "file": r["file"]} for r in result]
 
     def find_central_functions(self, top_n=5):
         with self.driver.session() as session:
-            return session.execute_read(self._find_central_tx, top_n)
+            return session.execute_read(self._find_central_tx, top_n, self.scan_id)
 
     @staticmethod
-    def _find_central_tx(tx, top_n):
+    def _find_central_tx(tx, top_n, scan_id):
         query = """
-            MATCH (caller:Function)-[:CALLS]->(target:Function)
+            MATCH (caller:Function {scan_id: $scan_id})-[:CALLS]->(target:Function {scan_id: $scan_id})
             WHERE target.file IS NOT NULL
             RETURN target.name AS name, target.file AS file, count(caller) AS incoming_calls
             ORDER BY incoming_calls DESC
             LIMIT $top_n
         """
-        result = tx.run(query, top_n=top_n)
+        result = tx.run(query, top_n=top_n, scan_id=scan_id)
         return [{"name": r["name"], "file": r["file"], "incoming_calls": r["incoming_calls"]} for r in result]

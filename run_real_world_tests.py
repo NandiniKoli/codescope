@@ -51,7 +51,7 @@ def analyze_repo(repo_url):
                         check=True, capture_output=True, timeout=90)
         facts = extract_facts_from_folder(temp_dir)
 
-        graph = CodeGraph(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD)
+        graph = CodeGraph(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, repo_url)
         graph.clear_all()
         graph.insert_facts(facts)
         edges = graph.get_all_edges()
